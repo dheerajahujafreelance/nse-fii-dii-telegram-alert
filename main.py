@@ -32,42 +32,32 @@ HEADERS = {
 # FETCH NSE DATA
 # ----------------------------------
 
+
 def fetch_nse_data():
 
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    for attempt in range(3):
+    urls = [
+        "https://www.nseindia.com/",
+        "https://www.nseindia.com/reports/fii-dii",
+        "https://www.nseindia.com/api/fiidiiTradeReact"
+    ]
+
+    for url in urls:
         try:
-            # Generate NSE session cookies
-            session.get(NSE_HOME, timeout=20)
-            time.sleep(2)
+            response = session.get(url, timeout=25)
 
-            session.get(
-                "https://www.nseindia.com/reports/fii-dii",
-                timeout=20
-            )
-            time.sleep(2)
-
-            response = session.get(
-                NSE_API,
-                timeout=20
-            )
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            if not isinstance(data, list) or not data:
-                raise ValueError("NSE returned empty or unexpected data")
-
-            return data
+            print("\nURL:", url)
+            print("Status:", response.status_code)
+            print("Content-Type:", response.headers.get("Content-Type"))
+            print("Cookies:", list(session.cookies.keys()))
+            print("Response:", response.text[:300])
 
         except Exception as error:
-            print(f"Attempt {attempt + 1} failed: {error}")
-            if attempt == 2:
-                raise
-            time.sleep(5 * (attempt + 1))
+            print("Request failed:", str(error))
+
+    raise RuntimeError("NSE diagnostic completed. Check logs.")
 
 # ----------------------------------
 # FORMAT NUMBERS

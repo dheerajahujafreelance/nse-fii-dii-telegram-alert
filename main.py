@@ -33,31 +33,72 @@ HEADERS = {
 # ----------------------------------
 
 
+
 def fetch_nse_data():
 
     session = requests.Session()
-    session.headers.update(HEADERS)
 
-    urls = [
-        "https://www.nseindia.com/",
-        "https://www.nseindia.com/reports/fii-dii",
-        "https://www.nseindia.com/api/fiidiiTradeReact"
-    ]
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/reports/fii-dii",
+    })
 
-    for url in urls:
+    for attempt in range(3):
+
         try:
-            response = session.get(url, timeout=25)
+            print("Opening NSE FII/DII report page...")
 
-            print("\nURL:", url)
-            print("Status:", response.status_code)
-            print("Content-Type:", response.headers.get("Content-Type"))
-            print("Cookies:", list(session.cookies.keys()))
-            print("Response:", response.text[:300])
+            # Step 1: Visit report page to establish session
+            page = session.get(
+                "https://www.nseindia.com/reports/fii-dii",
+                timeout=30
+            )
+
+            page.raise_for_status()
+
+            print("Report page status:", page.status_code)
+            print("Session cookies:", list(session.cookies.keys()))
+
+            time.sleep(2)
+
+            # Step 2: Fetch FII/DII JSON data
+            print("Fetching FII/DII API...")
+
+            response = session.get(
+                "https://www.nseindia.com/api/fiidiiTradeReact",
+                timeout=30
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            if not isinstance(data, list) or not data:
+                raise ValueError("Empty or invalid NSE response")
+
+            print("NSE API successful!")
+            print("Records received:", len(data))
+
+            return data
 
         except Exception as error:
-            print("Request failed:", str(error))
 
-    raise RuntimeError("NSE diagnostic completed. Check logs.")
+            print(
+                f"Attempt {attempt + 1} failed: {error}"
+            )
+
+            if attempt == 2:
+                raise
+
+            time.sleep(5 * (attempt + 1))
+
+    raise RuntimeError("Unable to fetch NSE data")
 
 # ----------------------------------
 # FORMAT NUMBERS

@@ -3,7 +3,7 @@ name: NSE FII DII Telegram Alert
 
 on:
   schedule:
-    - cron: '30 06 * * 1-5'
+    - cron: '30 09 * * 1-5'
 
   workflow_dispatch:
 

@@ -955,5 +955,13 @@ if __name__ == "__main__":
 
     finally:
 
-        log_handle.flush()
-        log_handle.close()
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+
+        except Exception:
+            pass
+
+        # Do NOT close log_handle here.
+        # Python must be allowed to flush stdout/stderr
+        # while the log file is still open.

@@ -5,6 +5,8 @@ import time
 import os
 import json
 import math
+import sys
+import logging
 
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,8 +14,10 @@ from collections import defaultdict
 
 
 # ==================================================
-# CONFIGURATION
+# 1. CONFIGURATION
 # ==================================================
+
+BASE_DIR = Path(__file__).resolve().parent
 
 NSE_HOME = "https://www.nseindia.com"
 
@@ -30,14 +34,21 @@ CHAT_ID = os.environ["CHAT_ID"]
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# Local JSON backup file
-# Can be overridden using NSE_CACHE_FILE environment variable
 CACHE_FILE = Path(
     os.environ.get(
         "NSE_CACHE_FILE",
-        str(Path(__file__).resolve().parent / "nse_fii_dii_backup.json")
+        str(BASE_DIR / "nse_fii_dii_backup.json")
     )
 )
+
+LOG_FILE = Path(
+    os.environ.get(
+        "NSE_LOG_FILE",
+        str(BASE_DIR / "nse_fii_dii.log")
+    )
+)
+
+CATEGORIES = {"DII", "FII/FPI"}
 
 HEADERS = {
     "User-Agent": (
@@ -50,11 +61,60 @@ HEADERS = {
     "Referer": REPORT_PAGE,
 }
 
-CATEGORIES = {"DII", "FII/FPI"}
+
+# ==================================================
+# 2. LOGGING
+# ==================================================
+
+LOG_FILE.parent.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+log_handle = open(
+    LOG_FILE,
+    "a",
+    encoding="utf-8",
+    buffering=1
+)
+
+
+class Tee:
+
+    def __init__(self, terminal, logfile):
+        self.terminal = terminal
+        self.logfile = logfile
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.logfile.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+        self.logfile.flush()
+
+
+sys.stdout = Tee(sys.stdout, log_handle)
+sys.stderr = Tee(sys.stderr, log_handle)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%d-%b-%Y %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stderr)
+    ],
+    force=True
+)
+
+logger = logging.getLogger("NSE_FII_DII")
+
+logger.info("=" * 50)
+logger.info("NSE FII/DII script started")
 
 
 # ==================================================
-# FETCH NSE DATA
+# 3. FETCH NSE DATA
 # ==================================================
 
 def fetch_nse_data():
@@ -67,7 +127,9 @@ def fetch_nse_data():
 
             try:
 
-                print("Opening NSE FII/DII report page...")
+                logger.info(
+                    "Opening NSE FII/DII report page..."
+                )
 
                 page = session.get(
                     REPORT_PAGE,
@@ -76,19 +138,16 @@ def fetch_nse_data():
 
                 page.raise_for_status()
 
-                print(
-                    "Report page status:",
+                logger.info(
+                    "NSE report page status: %s",
                     page.status_code
-                )
-
-                print(
-                    "Session cookies:",
-                    list(session.cookies.keys())
                 )
 
                 time.sleep(2)
 
-                print("Fetching NSE FII/DII API...")
+                logger.info(
+                    "Fetching NSE FII/DII API..."
+                )
 
                 response = session.get(
                     NSE_API,
@@ -100,14 +159,13 @@ def fetch_nse_data():
                 data = response.json()
 
                 if not isinstance(data, list) or not data:
+
                     raise ValueError(
                         "Empty or invalid NSE API response"
                     )
 
-                print("NSE API successful!")
-
-                print(
-                    "Records received:",
+                logger.info(
+                    "NSE API successful. Records: %s",
                     len(data)
                 )
 
@@ -115,20 +173,29 @@ def fetch_nse_data():
 
             except Exception as error:
 
-                print(
-                    f"Attempt {attempt + 1} failed: {error}"
+                logger.warning(
+                    "NSE attempt %s failed: %s",
+                    attempt + 1,
+                    error
                 )
 
                 if attempt == 2:
+
+                    logger.exception(
+                        "All NSE fetch attempts failed"
+                    )
+
                     raise
 
-                time.sleep(5 * (attempt + 1))
+                time.sleep(
+                    5 * (attempt + 1)
+                )
 
     raise RuntimeError("Unable to fetch NSE data")
 
 
 # ==================================================
-# DATE AND NUMBER VALIDATION
+# 4. DATE VALIDATION
 # ==================================================
 
 def parse_report_date(value):
@@ -145,6 +212,7 @@ def parse_report_date(value):
     ):
 
         try:
+
             return datetime.datetime.strptime(
                 value.strip(),
                 date_format
@@ -158,28 +226,44 @@ def parse_report_date(value):
     )
 
 
+# ==================================================
+# 5. RECORD VALIDATION
+# ==================================================
+
 def validate_record(row):
 
-    trade_date = parse_report_date(row["date"])
+    trade_date = parse_report_date(
+        row["date"]
+    )
 
     category = row["category"].strip()
 
     if category not in CATEGORIES:
-        raise ValueError("Invalid category")
+
+        raise ValueError(
+            "Invalid category"
+        )
 
     buy = float(row["buyValue"])
     sell = float(row["sellValue"])
     net = float(row["netValue"])
 
     if not all(
-        math.isfinite(x)
-        for x in (buy, sell, net)
+        math.isfinite(value)
+        for value in (buy, sell, net)
     ):
-        raise ValueError("Non-finite values")
 
-    # Validate Net = Buy - Sell
+        raise ValueError(
+            "Invalid numerical values"
+        )
+
+    # Net must equal Buy minus Sell
+
     if abs((buy - sell) - net) > 0.02:
-        raise ValueError("Net value validation failed")
+
+        raise ValueError(
+            "Net value validation failed"
+        )
 
     return {
         "date": trade_date.isoformat(),
@@ -189,10 +273,6 @@ def validate_record(row):
         "net": net
     }
 
-
-# ==================================================
-# PARSE NSE RECORDS
-# ==================================================
 
 def parse_nse_records(data):
 
@@ -215,8 +295,8 @@ def parse_nse_records(data):
 
             continue
 
-    print(
-        "Valid NSE records:",
+    logger.info(
+        "Successfully validated records: %s",
         len(parsed)
     )
 
@@ -224,7 +304,7 @@ def parse_nse_records(data):
 
 
 # ==================================================
-# FIND COMPLETE REPORTS
+# 6. FIND COMPLETE REPORTS
 # ==================================================
 
 def get_complete_reports(records):
@@ -241,13 +321,19 @@ def get_complete_reports(records):
                 row["date"]
             )
 
-            # Never use future-dated records
+            # Ignore future-dated records
+
             if report_date > today:
                 continue
 
             grouped[report_date].append(row)
 
-        except (KeyError, ValueError, TypeError):
+        except (
+            KeyError,
+            ValueError,
+            TypeError
+        ):
+
             continue
 
     complete_reports = {}
@@ -259,7 +345,8 @@ def get_complete_reports(records):
             for row in rows
         ]
 
-        # Require exactly one FII and one DII row
+        # Exactly one DII and one FII/FPI record
+
         if (
             len(rows) == 2
             and categories.count("DII") == 1
@@ -268,18 +355,25 @@ def get_complete_reports(records):
 
             complete_reports[report_date] = rows
 
+    logger.info(
+        "Complete reporting dates found: %s",
+        len(complete_reports)
+    )
+
     return complete_reports
 
 
 # ==================================================
-# LOAD LOCAL JSON BACKUP
+# 7. LOAD LOCAL JSON BACKUP
 # ==================================================
 
 def load_backup():
 
     if not CACHE_FILE.exists():
 
-        print("No previous JSON backup found.")
+        logger.info(
+            "No previous JSON backup found."
+        )
 
         return []
 
@@ -293,12 +387,18 @@ def load_backup():
             backup = json.load(file)
 
         if backup.get("version") != 1:
-            raise ValueError("Unsupported backup version")
+
+            raise ValueError(
+                "Unsupported backup version"
+            )
 
         reports = backup.get("reports", [])
 
         if not isinstance(reports, list):
-            raise ValueError("Invalid backup structure")
+
+            raise ValueError(
+                "Invalid backup structure"
+            )
 
         valid_records = []
 
@@ -306,17 +406,23 @@ def load_backup():
 
             try:
 
-                # Convert backup format into NSE-style
-                # validation input
                 normalized = validate_record({
+
                     "date": row["date"],
+
                     "category": row["category"],
+
                     "buyValue": row["buy"],
+
                     "sellValue": row["sell"],
+
                     "netValue": row["net"]
+
                 })
 
-                valid_records.append(normalized)
+                valid_records.append(
+                    normalized
+                )
 
             except (
                 KeyError,
@@ -326,29 +432,28 @@ def load_backup():
 
                 continue
 
-        print(
-            "Valid records loaded from backup:",
+        logger.info(
+            "Valid backup records loaded: %s",
             len(valid_records)
         )
 
         return valid_records
 
-    except Exception as error:
+    except Exception:
 
-        print(
-            f"WARNING: Could not read JSON backup: {error}"
+        logger.exception(
+            "Unable to read JSON backup"
         )
 
         return []
 
 
 # ==================================================
-# SAVE SUCCESSFUL REPORTS TO JSON
+# 8. SAVE SUCCESSFUL DATA TO JSON
 # ==================================================
 
 def save_backup(existing_records, new_records):
 
-    # Keep only complete reports
     old_reports = get_complete_reports(
         existing_records
     )
@@ -357,9 +462,13 @@ def save_backup(existing_records, new_records):
         new_records
     )
 
-    # Merge reports by date
-    # Fresh NSE data takes priority for the same date
+    # Preserve all previously saved complete reports
+
     merged = dict(old_reports)
+
+    # New successful NSE data takes priority
+    # for the same reporting date
+
     merged.update(new_reports)
 
     output = []
@@ -369,19 +478,29 @@ def save_backup(existing_records, new_records):
         for row in merged[report_date]:
 
             output.append({
+
                 "date": report_date.isoformat(),
+
                 "category": row["category"],
+
                 "buy": row["buy"],
+
                 "sell": row["sell"],
+
                 "net": row["net"]
+
             })
 
     backup = {
+
         "version": 1,
+
         "last_updated": datetime.datetime.now(
             IST
         ).isoformat(),
+
         "reports": output
+
     }
 
     CACHE_FILE.parent.mkdir(
@@ -407,30 +526,43 @@ def save_backup(existing_records, new_records):
             )
 
             file.flush()
-            os.fsync(file.fileno())
 
-        # Atomic replacement
+            os.fsync(
+                file.fileno()
+            )
+
+        # Atomic replacement protects existing backup
+
         os.replace(
             temp_file,
             CACHE_FILE
         )
 
-        print(
-            "JSON backup successfully updated:",
+        logger.info(
+            "JSON backup successfully saved: %s",
             CACHE_FILE
+        )
+
+        logger.info(
+            "Total saved records: %s",
+            len(output)
         )
 
     finally:
 
         if temp_file.exists():
+
             temp_file.unlink()
 
 
 # ==================================================
-# SELECT LATEST SUCCESSFUL REPORT
+# 9. SELECT LATEST SUCCESSFUL REPORT
 # ==================================================
 
-def select_latest_report(live_records, backup_records):
+def select_latest_report(
+    live_records,
+    backup_records
+):
 
     live_reports = get_complete_reports(
         live_records
@@ -440,13 +572,23 @@ def select_latest_report(live_records, backup_records):
         backup_records
     )
 
-    # Start with backup reports
-    available_reports = dict(backup_reports)
+    # Start with historical backup
 
-    # Fresh NSE data takes priority on matching dates
-    available_reports.update(live_reports)
+    available_reports = dict(
+        backup_reports
+    )
+
+    # Fresh NSE data takes priority for same date
+
+    available_reports.update(
+        live_reports
+    )
 
     if not available_reports:
+
+        logger.error(
+            "No complete successful report available"
+        )
 
         return None, None, None
 
@@ -466,6 +608,16 @@ def select_latest_report(live_records, backup_records):
 
         source = "LOCAL JSON BACKUP"
 
+    logger.info(
+        "Selected report date: %s",
+        latest_date
+    )
+
+    logger.info(
+        "Selected source: %s",
+        source
+    )
+
     return (
         latest_date,
         selected_rows,
@@ -474,7 +626,7 @@ def select_latest_report(live_records, backup_records):
 
 
 # ==================================================
-# FORMAT NUMBERS
+# 10. FORMAT NUMBERS
 # ==================================================
 
 def format_number(value):
@@ -483,7 +635,7 @@ def format_number(value):
 
 
 # ==================================================
-# CREATE TELEGRAM MESSAGE
+# 11. CREATE TELEGRAM MESSAGE
 # ==================================================
 
 def create_message(
@@ -499,7 +651,6 @@ def create_message(
         "%d-%b-%Y"
     )
 
-    # Determine report status
     if selected_date == today:
 
         if source == "NSE LIVE":
@@ -522,22 +673,34 @@ def create_message(
         )
 
     message = (
+
         "📊 <b>NSE FII / DII DAILY REPORT</b>\n"
+
         "━━━━━━━━━━━━━━━━━━━━\n"
+
         f"📅 Data Date: {date_text}\n"
+
         f"{status_text}\n"
+
         f"📂 Data Source: {source}\n"
+
         "📍 Capital Market Segment\n"
+
         "💰 Values in ₹ Crores\n\n"
+
         "<pre>"
+
         f"{'CATEGORY':<10} "
         f"{'BUY':>11} "
         f"{'SELL':>11} "
         f"{'NET':>11}\n"
+
         "────────────────────────────────────────\n"
+
     )
 
-    rows.sort(
+    rows = sorted(
+        rows,
         key=lambda r: (
             0 if r["category"] == "DII" else 1
         )
@@ -548,15 +711,19 @@ def create_message(
         net_text = f"{row['net']:+,.2f}"
 
         message += (
+
             f"{row['category']:<10} "
+
             f"{format_number(row['buy']):>11} "
+
             f"{format_number(row['sell']):>11} "
+
             f"{net_text:>11}\n"
+
         )
 
     message += "</pre>\n"
 
-    # Net buyer/seller status
     for row in rows:
 
         if row["net"] > 0:
@@ -575,24 +742,29 @@ def create_message(
             f"\n<b>{row['category']}: </b>{status}"
         )
 
-    # Show NSE fetch error when backup was needed
     if fetch_error and source == "LOCAL JSON BACKUP":
 
         message += (
+
             "\n\n⚠️ <b>NSE API unavailable.</b>"
+
             "\nRetrieved data from local backup."
+
         )
 
     message += (
+
         "\n\n<a href='https://www.nseindia.com/reports/fii-dii'>"
+
         "Source: NSE India</a>"
+
     )
 
     return message
 
 
 # ==================================================
-# SEND TELEGRAM MESSAGE
+# 12. SEND TELEGRAM MESSAGE
 # ==================================================
 
 def send_telegram(message):
@@ -603,59 +775,84 @@ def send_telegram(message):
     )
 
     payload = {
+
         "chat_id": CHAT_ID,
+
         "text": message,
+
         "parse_mode": "HTML",
+
         "disable_web_page_preview": True
+
     }
 
-    response = requests.post(
-        url,
-        json=payload,
-        timeout=30
-    )
+    try:
 
-    response.raise_for_status()
-
-    result = response.json()
-
-    if not result.get("ok"):
-
-        raise RuntimeError(
-            f"Telegram error: {result}"
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=30
         )
 
-    print("Telegram alert sent successfully!")
+        if not response.ok:
+
+            raise RuntimeError(
+                f"Telegram HTTP error: {response.status_code}"
+            )
+
+        result = response.json()
+
+        if not result.get("ok"):
+
+            raise RuntimeError(
+                "Telegram rejected the message"
+            )
+
+        logger.info(
+            "Telegram alert sent successfully"
+        )
+
+    except Exception as error:
+
+        # Do not expose the bot token in logs
+        raise RuntimeError(
+            f"Telegram delivery failed: {type(error).__name__}"
+        ) from None
 
 
 # ==================================================
-# MAIN PROGRAM
+# 13. MAIN PROGRAM
 # ==================================================
 
-if __name__ == "__main__":
+def main():
 
-    print("=" * 50)
-
-    print(
-        "NSE FII/DII AUTOMATED TELEGRAM ALERT"
-    )
-
-    print(
-        "Execution time:",
+    logger.info(
+        "Execution time: %s",
         datetime.datetime.now(IST).strftime(
             "%d-%b-%Y %H:%M:%S IST"
         )
     )
 
-    print("=" * 50)
+    logger.info(
+        "JSON backup location: %s",
+        CACHE_FILE
+    )
 
-    # Step 1: Load previous successful data
+    logger.info(
+        "Log file location: %s",
+        LOG_FILE
+    )
+
+    # Step 1: Load historical backup
+
     backup_records = load_backup()
 
     live_records = []
+
     fetch_error = None
 
-    # Step 2: Attempt to fetch current NSE data
+    # Step 2: Fetch NSE data
+
     try:
 
         raw_data = fetch_nse_data()
@@ -664,9 +861,8 @@ if __name__ == "__main__":
             raw_data
         )
 
-        # Step 3: Save only complete successful
-        # NSE reports. Never replace good backup
-        # with incomplete data.
+        # Step 3: Save complete successful reports
+
         save_backup(
             backup_records,
             live_records
@@ -674,58 +870,90 @@ if __name__ == "__main__":
 
     except Exception as error:
 
-        fetch_error = str(error)
+        fetch_error = type(error).__name__
 
-        print(
-            "WARNING: NSE fetch failed:",
+        logger.error(
+            "NSE fetch failed: %s",
             fetch_error
         )
 
-        print(
-            "Will attempt to use local JSON backup."
+        logger.info(
+            "Using local backup if available."
         )
 
     # Step 4: Select latest successful report
+
     selected_date, rows, source = select_latest_report(
+
         live_records,
+
         backup_records
+
     )
 
-    # Step 5: Create alert
+    # Step 5: Create Telegram message
+
     if selected_date is None:
 
         message = (
+
             "⚠️ <b>NSE FII/DII ALERT</b>\n\n"
+
             "No successfully validated FII/DII "
             "report is available in NSE data "
-            "or the local JSON backup.\n\n"
+            "or local JSON backup.\n\n"
+
             "<a href='https://www.nseindia.com/reports/fii-dii'>"
+
             "Check NSE report</a>"
+
         )
 
     else:
 
-        print(
-            "Selected report date:",
-            selected_date
-        )
-
-        print(
-            "Selected data source:",
-            source
-        )
-
         message = create_message(
+
             selected_date,
+
             rows,
+
             source,
+
             fetch_error
+
         )
 
     # Step 6: Send Telegram alert
+
     print("\n")
     print(message)
 
     send_telegram(message)
 
-    print("\nExecution completed.")
+    logger.info(
+        "Execution completed successfully"
+    )
+
+
+# ==================================================
+# 14. EXECUTION
+# ==================================================
+
+if __name__ == "__main__":
+
+    try:
+
+        main()
+
+    except Exception:
+
+        logger.exception(
+            "FATAL: NSE FII/DII execution failed"
+        )
+
+        raise
+
+    finally:
+
+        log_handle.flush()
+        log_handle.close()

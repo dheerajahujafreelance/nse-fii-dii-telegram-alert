@@ -3,28 +3,97 @@ name: NSE FII DII Telegram Alert
 
 on:
   schedule:
-    - cron: '30 09 * * 1-5'
+    # Monday to Friday at 8:00 PM IST
+    - cron: "30 14 * * 1-5"
 
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: nse-fii-dii-alert
+  cancel-in-progress: false
+
 jobs:
-  send-alert:
+  nse-alert:
+
     runs-on: ubuntu-latest
 
     steps:
+
+      # 1. Checkout repository
+
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      # 2. Setup Python
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
+
+      # 3. Install dependencies
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run FII DII alert
+      # 4. Execute NSE alert
+
+      - name: Run NSE FII DII alert
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python main.py
+        run: |
+          python main.py
+
+      # 5. Commit JSON backup
+
+      - name: Persist JSON backup
+        if: always()
+        run: |
+
+          if [ -f nse_fii_dii_backup.json ]; then
+
+            git config user.name "github-actions[bot]"
+
+            git config user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add nse_fii_dii_backup.json
+
+            if ! git diff --cached --quiet; then
+
+              git commit -m "Update NSE FII DII data backup"
+
+              git push origin "HEAD:${GITHUB_REF_NAME}"
+
+              echo "JSON backup committed successfully"
+
+            else
+
+              echo "No changes to JSON backup"
+
+            fi
+
+          else
+
+            echo "No JSON backup available"
+
+          fi
+
+      # 6. Upload log file
+
+      - name: Upload execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nse-fii-dii-execution-log
+          path: nse_fii_dii.log
+          if-no-files-found: warn
+          retention-days: 30
